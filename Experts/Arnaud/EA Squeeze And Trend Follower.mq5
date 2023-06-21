@@ -37,32 +37,35 @@ enum ENUM_TRAILING_MODE
 //+------------------------------------------------------------------+
 //| Input variables                                                  |
 //+------------------------------------------------------------------+
+sinput string Trade_Settings; // Trade Settings
 input ENUM_TRAILING_MODE   Trailing_Mode = TRAILING_BB_ONE_STDDEV;
+input int NumberOfBreakEventPoints = 100; // Number of points for break even
 
 sinput string              BB_Settings; // Bollinger Bands Settings for the trailing stop
-input int                  BB_MA_Period = 20;
-input int                  BB_MA_Shift = 0;
-input ENUM_APPLIED_PRICE   BB_MA_Applied_Price = PRICE_CLOSE;
+input int                  BB_MA_Period = 20; // Period
+input int                  BB_MA_Shift = 0; // Shift
+input ENUM_APPLIED_PRICE   BB_MA_Applied_Price = PRICE_CLOSE; // Type Of Price
 
 sinput string              TTM_Squeeze_Settings; // TTM Squeeze Settings
 input int                  TTM_BB_Length     = 20;          // Bollinger Bands Period
 input double               TTM_BB_Mult       = 2.0;         // Bollinger Bands MultFactor
 input int                  TTM_KC_Length     = 20;          // Keltner Channel Period
 input double               TTM_KC_Mult       = 1.5;         // Keltner Channel MultFactor
-input ENUM_APPLIED_PRICE   TTM_Applied_Price = PRICE_CLOSE; // type of price
+input ENUM_APPLIED_PRICE   TTM_Applied_Price = PRICE_CLOSE; // Type Of Price
 
 sinput string Timer_Settings; 	// Timer Settings
-input bool UseTimer = true;
-input int StartHour = 10; // Beginning of London Stock Exchange
-input int StartMinute = 0;
-input int EndHour = 19; // End of London Stock Exchange
-input int EndMinute = 0;
-input bool UseLocalTime = false;
+input bool UseTimer = true; // Use Timer
+input int StartHour = 10; // Start Hour
+input int StartMinute = 0; // Start Minute
+input int EndHour = 19; // End Hour
+input int EndMinute = 0; // End Minute
+input bool UseLocalTime = false; // Use Local Time
 
 //+------------------------------------------------------------------+
 //| Global variables                                                 |
 //+------------------------------------------------------------------+
 int h_ttm_squeeze;
+bool BreakEvenTargetHit;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -104,6 +107,9 @@ void OnTick()
 	
    // Check for new bar
 	bool newBar = NewBar.CheckNewBar(_Symbol, PERIOD_CURRENT);
+	// Reset the profit and loss of the position
+	if (PositionsTotal() == 0)
+	   BreakEvenTargetHit = false;
 	
 	Price.Update(_Symbol, PERIOD_CURRENT);
 	BB_One_StdDev.Refresh();
@@ -120,24 +126,30 @@ void OnTick()
 	   double previousClose = Price.Close(1);
 	   double squeeze[1], momentum[2];
 	   if (!CopyBuffer(h_ttm_squeeze, 3, 1, 1, squeeze)) return; // 
-	   if (!CopyBuffer(h_ttm_squeeze, 0, 2, 2, momentum)) return; // momentum[0] contains the (n-2)-th value and momentum[1] contains the (n-1)-th value
+	   if (!CopyBuffer(h_ttm_squeeze, 0, 1, 2, momentum)) return; // momentum[0] contains the (n-2)-th value and momentum[1] contains the (n-1)-th value   
 	   
 	   bool squeezeOff = squeeze[0] == 2.0;
 	   
 	   // TODO : add time condition and TTM condition
 	   if (squeezeOff && momentum[1] > 0 && momentum[0] < momentum[1] && previousClose > bb_one_up)
 	   {
-	      // Buy
-	      // During the test phase, we use the minimum volume
-	      double min_lot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-	      Trade.Buy(min_lot, _Symbol);
+	      if (IsExtremumOfNthLastPrices(Price.High(1), 5, true))
+	      {
+   	      // Buy
+   	      // During the test phase, we use the minimum volume
+   	      double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   	      Trade.Buy(min_lot, _Symbol);
+	      }
 	   }
 	   else if (squeezeOff && momentum[1] < 0 && momentum[0] > momentum[1] && previousClose < bb_one_low)
 	   {
-	      // Sell
-	      // During the test phase, we use the minimum volume
-	      double min_lot = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-	      Trade.Sell(min_lot, _Symbol);
+	      if (IsExtremumOfNthLastPrices(Price.Low(1), 5, false))
+	      {
+   	      // Sell
+   	      // During the test phase, we use the minimum volume
+   	      double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   	      Trade.Sell(min_lot, _Symbol);
+	      }
 	   }
 	}
 	
@@ -154,6 +166,13 @@ void OnTick()
       long posType = PositionGetInteger(POSITION_TYPE);
       if (posType != POSITION_TYPE_BUY && posType != POSITION_TYPE_SELL)
          continue;
+         
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double last = Price.Close(0);
+      double pnl = posType == POSITION_TYPE_BUY ? last - openPrice : openPrice - last;
+      int pnlInPoint = (int)NormalizeDouble(pnl / Point(), 0);
+      if (pnlInPoint >= NumberOfBreakEventPoints)
+         BreakEvenTargetHit = true;
 	   
 	   double posStop = PositionGetDouble(POSITION_SL);	   
 	   if(newBar == true || posStop == 0.0)
@@ -168,7 +187,7 @@ void OnTick()
       	mean = NormalizeDouble(mean, (int)digits);
       	double sl = 0;
       	switch(Trailing_Mode)
-      	  {
+      	{
       	   case  TRAILING_BB_ONE_STDDEV:
       	     sl = posType == POSITION_TYPE_BUY ? bb_one_up : bb_one_low + spread;
       	     break;
@@ -178,10 +197,27 @@ void OnTick()
       	   case TRAILING_BB_MOVING_AVERAGE:
       	     sl = posType == POSITION_TYPE_BUY ? mean : mean + spread;
       	     break;
-      	  }
+      	}
+         
+         // If the number of points for the break event is hit then the SL is at least the break even
+         if (BreakEvenTargetHit)
+            sl = posType == POSITION_TYPE_BUY ? MathMax(sl, openPrice) : MathMin(sl, openPrice);
       	
    	   Trade.PositionModify(ticket, sl, tp);
    	}
    }
 }
 //+------------------------------------------------------------------+
+
+bool IsExtremumOfNthLastPrices(double price, int n, bool max)
+{
+   for (int i = 1; i <= n; ++i)
+   {
+      if (max && price < Price.High(i))
+         return false;
+      else if (!max && price > Price.Low(i))
+         return false;
+   }
+   
+   return true;
+}
